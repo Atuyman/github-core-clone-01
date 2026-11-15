@@ -1,3 +1,8 @@
+// Entrypoint contract: this file owns only the entry <-> env lifecycle — bind an ephemeral
+// port, register it with the env, poll /done until the trial ends, then exit 0. The HTTP server
+// itself lives in app.ts (createApp). Started as `node main.ts`; without MAKEFUN_ENV_URL there
+// is no env to register with, so it exits 1 at once.
+//
 // The entry <-> env lifecycle, as env/src/wire.ts settles it: bind an ephemeral port, tell the env the
 // port it bound, then poll until the env says the trial is over and exit 0. Keep this file as it is:
 // the suite scores the server app.ts builds, and the lifecycle is the harness's, not the contest's.
