@@ -1,5 +1,9 @@
 # github-core-clone-01
 
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/Atuyman/github-core-clone-01/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/Atuyman/github-core-clone-01/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+
 A GitHub-compatible forge in one process, no UI: git smart HTTP, REST v3, GraphQL v4
 and MCP, all backed by its own in-memory object store. Built for
 [the contest](https://make.fun/bounty/github-core-clone-01). Stdlib only — no git
@@ -107,3 +111,7 @@ graphql 20, mcp 15, protocol 5), agent 200/200, perf 141–148/200, total score
 - `app.ts`: the server — routes the four surfaces onto one store.
 - `git.ts`, `gitobj.ts`, `rest.ts`, `graphql.ts`, `mcp.ts`, `store.ts`, `util.ts`: the forge.
 - `package.json`, `tsconfig.json`, `LICENSE` (MIT): the entry's metadata and licence.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=yfywnefc&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards</sub>
