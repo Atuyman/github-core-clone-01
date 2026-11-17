@@ -852,6 +852,7 @@ function executeMutation(ctx: ExecContext, op: OperationNode, data: Record<strin
         }
         found.issue.state = 'closed';
         found.issue.updatedAt = ctx.store.nowIso();
+        found.repo.issueRev += 1;
         const issueObj: Record<string, unknown> = {};
         for (const sub of sel.selectionSet) {
           if (sub.kind === 'fragment') continue;

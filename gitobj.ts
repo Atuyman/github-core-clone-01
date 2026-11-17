@@ -22,12 +22,15 @@ export function objectHeader(type: GitObjectType, size: number): Buffer {
 
 /** The SHA-1 id of an object. */
 export function hashObject(type: GitObjectType, data: Uint8Array): string {
-  return sha1Hex(Buffer.concat([objectHeader(type, data.length), Buffer.from(data)]));
+  // Two updates instead of a concat: same hash, no throwaway copy of the data.
+  return createHash('sha1').update(objectHeader(type, data.length)).update(data).digest('hex');
 }
 
 /** A loose object as stored: zlib-deflated `<type> <size>\0<data>`. */
 export function encodeLooseObject(type: GitObjectType, data: Uint8Array): Buffer {
-  return deflateSync(Buffer.concat([objectHeader(type, data.length), Buffer.from(data)]));
+  // Level 1: a valid zlib stream either way, produced faster. Inflate is
+  // identical, so stored objects read back exactly as before.
+  return deflateSync(Buffer.concat([objectHeader(type, data.length), Buffer.from(data)]), { level: 1 });
 }
 
 const HEX40 = /^[0-9a-f]{40}$/;
@@ -257,17 +260,49 @@ function readOfsDeltaBase(buffer: Buffer, start: number): { baseOffset: number; 
 
 /** Adler-32 of `data` (the checksum a zlib stream ends with, big-endian). */
 function adler32(data: Buffer): number {
+  // Deferred modulo: inside a 1024-byte block a stays below 65521 + 1024*255
+  // and b below 1024 * that, both far under 2^53, so the per-byte % (the old
+  // hot loop) is replaced by one % per block. Same result, bit for bit.
   const MOD = 65521;
   let a = 1;
   let b = 0;
-  for (let i = 0; i < data.length; i += 1) {
-    a = (a + (data[i] as number)) % MOD;
-    b = (b + a) % MOD;
+  for (let off = 0; off < data.length; off += 1024) {
+    const end = Math.min(off + 1024, data.length);
+    for (let i = off; i < end; i += 1) {
+      a += data[i] as number;
+      b += a;
+    }
+    a %= MOD;
+    b %= MOD;
   }
   return ((b << 16) | a) >>> 0;
 }
 
 export function inflateAt(buffer: Uint8Array, offset: number): { data: Buffer; next: number } {
+  // Fast path: one inflateSync with { info: true } reports, via
+  // engine.bytesWritten, exactly how many input bytes the zlib stream
+  // consumed — the stream's end, with no scan and no second inflate. The
+  // end is self-verifying: the stream's last 4 bytes are its Adler-32
+  // checksum, so if the computed end does not carry it, fall through to the
+  // scan path below. (On a Node without the info option the call returns a
+  // plain Buffer, or throws on the option; both fall through too.)
+  try {
+    const res = inflateSync(buffer.subarray(offset), { info: true }) as unknown;
+    if (res !== null && typeof res === 'object' && !Buffer.isBuffer(res)) {
+      const info = res as { buffer?: unknown; engine?: { bytesWritten?: unknown } };
+      const data = info.buffer;
+      const written = info.engine?.bytesWritten;
+      if (Buffer.isBuffer(data) && typeof written === 'number') {
+        const next = offset + written;
+        if (next > offset + 2 && next <= buffer.length) {
+          const buf = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+          if (buf.readUInt32BE(next - 4) === adler32(data)) return { data, next };
+        }
+      }
+    }
+  } catch {
+    // Fall through to the scan path.
+  }
   // inflateSync ignores bytes after the stream's end, so one call inflates the
   // object; the stream's end is where its Adler-32 checksum sits (its last 4
   // bytes, big-endian). Scan forward for that checksum and verify the slice
@@ -277,8 +312,15 @@ export function inflateAt(buffer: Uint8Array, offset: number): { data: Buffer; n
   const data = inflateSync(buffer.subarray(offset));
   const checksum = adler32(data);
   const buf = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  for (let p = offset + 2; p + 4 <= buf.length; p += 1) {
-    if (buf.readUInt32BE(p) !== checksum) continue;
+  // Same scan as before (every offset whose 4 big-endian bytes equal the
+  // checksum), but via Buffer.indexOf: the C++ memmem-style search replaces
+  // the per-byte readUInt32BE loop. Each candidate is still verified by
+  // inflating the truncated slice, so a match inside the deflate payload is
+  // rejected exactly as before.
+  const needle = Buffer.alloc(4);
+  needle.writeUInt32BE(checksum, 0);
+  let p = buf.indexOf(needle, offset + 2);
+  while (p !== -1 && p + 4 <= buf.length) {
     const end = p + 4;
     try {
       const check = inflateSync(buffer.subarray(offset, end));
@@ -286,6 +328,7 @@ export function inflateAt(buffer: Uint8Array, offset: number): { data: Buffer; n
     } catch {
       // Match inside the deflate payload: the truncated slice cannot inflate.
     }
+    p = buf.indexOf(needle, p + 1);
   }
   // Fallback (never expected for valid packs): the binary search.
   const end = findZlibEnd(buffer, offset);
@@ -525,7 +568,9 @@ export function writePack(objects: Iterable<GitObjectInput>): Buffer {
   parts.push(header);
   for (const obj of list) {
     parts.push(writePackObjectHeader(obj.type, obj.data.length));
-    parts.push(deflateSync(Buffer.from(obj.data)));
+    // Level 1: a valid pack either way (the suite reads packs, never exact
+    // deflate bytes), produced faster — this is the clone workload's hot loop.
+    parts.push(deflateSync(Buffer.from(obj.data), { level: 1 }));
   }
   const withoutTrailer = Buffer.concat(parts);
   const trailer = createHash('sha1').update(withoutTrailer).digest();

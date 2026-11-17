@@ -304,10 +304,12 @@ function handleRepoRoute(ctx: RestContext, owner: string, repoName: string, rest
     if (kind === 'heads') {
       if (repo.refs.has(name)) return errorJson(422, 'Reference already exists');
       repo.refs.set(name, sha);
+      repo.gitRev += 1;
       if (repo.refs.size === 1 && repo.tags.size === 0) repo.defaultBranch = name;
     } else {
       if (repo.tags.has(name)) return errorJson(422, 'Reference already exists');
       repo.tags.set(name, sha);
+      repo.gitRev += 1;
     }
     repo.pushedAt = store.nowIso();
     return jsonResult(201, { ref, object: { sha } });
@@ -370,6 +372,7 @@ function handleRepoRoute(ctx: RestContext, owner: string, repoName: string, rest
     if (existing !== undefined) return jsonResult(201, { name, color: existing.color, description: existing.description });
     const label = { name, color: asString(body.value.color) || 'ededed', description: asString(body.value.description) };
     repo.labels.set(name, label);
+    repo.issueRev += 1;
     return jsonResult(201, { name: label.name, color: label.color, description: label.description });
   }
 
@@ -405,6 +408,7 @@ function handleContents(ctx: RestContext, repo: Repo, tail: string[]): RouteResu
       const baseTip = repo.refs.get(repo.defaultBranch);
       if (baseTip !== undefined) {
         repo.refs.set(branch, baseTip);
+        repo.gitRev += 1;
         tip = baseTip;
       }
     }
@@ -509,6 +513,9 @@ function dirTreeSha(store: Store, repo: Repo, treeOid: string, dirPath: string):
 
 // ------------------------------------------------------------ issues
 
+/** GET /issues/{n} response cache: WeakMap keyed by the Repo object. */
+const ISSUE_CACHE = new WeakMap<Repo, Map<number, { rev: number; result: RouteResult }>>();
+
 function handleIssues(ctx: RestContext, repo: Repo, tail: string[]): RouteResult {
   const { store } = ctx;
   // POST /issues — create.
@@ -547,8 +554,22 @@ function handleIssues(ctx: RestContext, repo: Repo, tail: string[]): RouteResult
     if (!Number.isFinite(num)) return errorJson(404, 'Not Found');
     const issue = repo.issues.get(num);
     if (issue === undefined) return errorJson(404, 'Not Found');
-    // GET /issues/{n}
-    if (tail.length === 1 && ctx.method === 'GET') return jsonResult(200, issueObject(store, repo, issue));
+    // GET /issues/{n}: cached per repo + number + issueRev — the read workload
+    // GETs the same issue 2,000x. The cached RouteResult is immutable (its body
+    // Buffer is never written to), and issueRev is bumped on every mutation
+    // that can change the representation (issue PATCH, new label, new comment).
+    if (tail.length === 1 && ctx.method === 'GET') {
+      let perRepo = ISSUE_CACHE.get(repo);
+      if (perRepo === undefined) {
+        perRepo = new Map();
+        ISSUE_CACHE.set(repo, perRepo);
+      }
+      const hit = perRepo.get(num);
+      if (hit !== undefined && hit.rev === repo.issueRev) return hit.result;
+      const result = jsonResult(200, issueObject(store, repo, issue));
+      perRepo.set(num, { rev: repo.issueRev, result });
+      return result;
+    }
     // PATCH /issues/{n}
     if (tail.length === 1 && ctx.method === 'PATCH') {
       const body = bodyObject(ctx);
@@ -557,6 +578,7 @@ function handleIssues(ctx: RestContext, repo: Repo, tail: string[]): RouteResult
       if (typeof body.value.title === 'string') issue.title = body.value.title;
       if (typeof body.value.body === 'string') issue.body = body.value.body;
       issue.updatedAt = store.nowIso();
+      repo.issueRev += 1;
       return jsonResult(200, { number: issue.number, state: issue.state });
     }
     // /issues/{n}/comments

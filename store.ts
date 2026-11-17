@@ -79,6 +79,10 @@ export interface Repo {
   readonly comments: Map<number, IssueComment[]>; // issue number -> comments
   commentSeq: number;
   deleted: boolean;
+  /** Bumped on any git-state change (objects, refs, tags, default branch): invalidates the fetch/advertisement caches. */
+  gitRev: number;
+  /** Bumped on any issue-state change (issue fields, labels, comments): invalidates the issue-response cache. */
+  issueRev: number;
 }
 
 export interface User {
@@ -211,6 +215,8 @@ export class Store {
       comments: new Map(),
       commentSeq: 0,
       deleted: false,
+      gitRev: 0,
+      issueRev: 0,
     };
     this.reposByName.set(name, repo);
     return repo;
@@ -225,6 +231,7 @@ export class Store {
   putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
     const oid = hashObject(type, data);
     if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data });
+    repo.gitRev += 1;
     return oid;
   }
 
@@ -235,6 +242,7 @@ export class Store {
       if (!repo.objects.has(obj.oid)) repo.objects.set(obj.oid, { type: obj.type, data: obj.data });
       oids.push(obj.oid);
     }
+    repo.gitRev += 1;
     return oids;
   }
 
@@ -491,6 +499,7 @@ export class Store {
       updatedAt: now,
     };
     repo.issues.set(issue.number, issue);
+    repo.issueRev += 1;
     return issue;
   }
 
@@ -523,6 +532,7 @@ export class Store {
     const list = repo.comments.get(issueNumber) ?? [];
     list.push(comment);
     repo.comments.set(issueNumber, list);
+    repo.issueRev += 1;
     return comment;
   }
 }

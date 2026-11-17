@@ -74,8 +74,30 @@ function v2Advertisement(): Buffer {
 /**
  * v0 advertisement: `# service=...` preamble, then ref lines; capabilities ride
  * on the first line after a NUL. Empty repo: a single `capabilities^{}` line.
+ *
+ * Cached per repo + service + gitRev: the advertisement is a pure function of
+ * the ref set, and the clone workload fetches the identical advertisement 50x
+ * per round. The cache is keyed by the Repo object (a recreated repo is a new
+ * object) and invalidated by any gitRev bump.
  */
+const AD_CACHE = new WeakMap<Repo, { rev: number; upload: Buffer | null; receive: Buffer | null }>();
 function v0Advertisement(store: Store, repo: Repo, service: 'git-upload-pack' | 'git-receive-pack'): Buffer {
+  const cached = AD_CACHE.get(repo);
+  if (cached !== undefined && cached.rev === repo.gitRev) {
+    const hit = service === 'git-upload-pack' ? cached.upload : cached.receive;
+    if (hit !== null) return hit;
+  }
+  const built = buildV0Advertisement(store, repo, service);
+  const entry = cached !== undefined && cached.rev === repo.gitRev
+    ? cached
+    : { rev: repo.gitRev, upload: null, receive: null };
+  if (service === 'git-upload-pack') entry.upload = built;
+  else entry.receive = built;
+  AD_CACHE.set(repo, entry);
+  return built;
+}
+
+function buildV0Advertisement(store: Store, repo: Repo, service: 'git-upload-pack' | 'git-receive-pack'): Buffer {
   const lines: Buffer[] = [encodePktLine(`# service=${service}\n`)];
   const caps =
     service === 'git-upload-pack'
@@ -369,6 +391,19 @@ function computeAcks(store: Store, repo: Repo, haves: string[]): { nak: boolean;
   return { nak: acked.length === 0, acked };
 }
 
+/**
+ * Fetch-response cache: a fetch answer is a pure function of the repo state
+ * (gitRev) plus the negotiated request (wants, haves, shallow, depth). The
+ * clone workload repeats the identical depth-1 fetch 50x per round, so the
+ * first builds the pack and the rest reuse the exact bytes. Keyed by the Repo
+ * object; a recreated repo is a new object, so no stale entry can survive a
+ * delete + recreate. The cached Buffer is never mutated after creation.
+ */
+const FETCH_CACHE = new WeakMap<Repo, { key: string; rev: number; body: Buffer }>();
+function fetchCacheKey(wants: string[], haves: string[], shallow: string[], depth: number | null): string {
+  return `${wants.join(',')}|${haves.join(',')}|${shallow.join(',')}|${depth ?? ''}`;
+}
+
 function handleUploadPackPost(store: Store, repo: Repo, body: Buffer): GitResult {
   const decoder = new PktLineDecoder();
   let packets;
@@ -392,16 +427,26 @@ function handleUploadPackPost(store: Store, repo: Repo, body: Buffer): GitResult
   }
   if (first.startsWith('command=fetch')) {
     const req = parseFetchLines(packets);
+    const key = fetchCacheKey(req.wants, req.haves, req.shallow, req.depth);
+    const hit = FETCH_CACHE.get(repo);
+    if (hit !== undefined && hit.rev === repo.gitRev && hit.key === key) return ok(UPLOAD_RESULT, hit.body);
     const selection = selectFetch(store, repo, req.wants, req.haves, req.shallow, req.depth);
     const acks = computeAcks(store, repo, req.haves);
-    return ok(UPLOAD_RESULT, fetchResponseV2(selection, acks));
+    const out = fetchResponseV2(selection, acks);
+    FETCH_CACHE.set(repo, { key, rev: repo.gitRev, body: out });
+    return ok(UPLOAD_RESULT, out);
   }
   if (first.startsWith('want ')) {
     // v0 fetch: two sections (wants, then haves) separated by a flush.
     const req = parseFetchLines(packets);
+    const key = fetchCacheKey(req.wants, req.haves, req.shallow, req.depth);
+    const hit = FETCH_CACHE.get(repo);
+    if (hit !== undefined && hit.rev === repo.gitRev && hit.key === key) return ok(UPLOAD_RESULT, hit.body);
     const selection = selectFetch(store, repo, req.wants, req.haves, req.shallow, req.depth);
     const acks = computeAcks(store, repo, req.haves);
-    return ok(UPLOAD_RESULT, fetchResponseV0(selection, acks));
+    const out = fetchResponseV0(selection, acks);
+    FETCH_CACHE.set(repo, { key, rev: repo.gitRev, body: out });
+    return ok(UPLOAD_RESULT, out);
   }
   return badRequest('unknown upload-pack command');
 }
@@ -526,6 +571,7 @@ export function handleReceivePack(store: Store, owner: string, repoName: string,
           repo.tags.set(parts.name, cmd.newOid);
         }
       }
+      repo.gitRev += 1;
       repo.pushedAt = store.nowIso();
     }
     reportLines.push(verdict.ok ? `ok ${cmd.ref}` : `ng ${cmd.ref} ${verdict.reason}`);
